@@ -1,197 +1,275 @@
-﻿using System;
+﻿using ChessChallenge.API;
+using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Numerics;
-using ChessChallenge.API;
 
-// An extremely strong bot that can perform evaluation and pick the best move
 public class MyBot : IChessBot
 {
-  
-        // Piece values: null, pawn, knight, bishop, rook, queen, king
-        int[] pieceValues = { 0, 100, 300, 300, 500, 900, 10000 };
+    private const int MaxDepth = 3;
+    private Dictionary<string, (int, Move)> transpositionTable = new Dictionary<string, (int, Move)>();
 
-        public Move Think(Board board, Timer timer)
+    public Move Think(Board board, Timer timer)
+    {
+        Move bestMove = new Move();
+        for (int depth = 1; depth <= MaxDepth; depth++)
         {
-            Move[] allMoves = board.GetLegalMoves();
+            var (_, move) = Minimax(board, depth, int.MinValue, int.MaxValue, board.IsWhiteToMove);
+            bestMove = move;
+        }
+        return bestMove;
+    }
 
-            // Pick a random move to play if nothing better is found
-            Random rng = new();
-            Move moveToPlay = allMoves[rng.Next(allMoves.Length)];
-            int highestStrengthPosition = -1000000;
-
-            foreach (Move move in allMoves)
-            {
-                // Always play checkmate in one
-                if (MoveIsCheckmate(board, move))
-                {
-                    moveToPlay = move;
-                    break;
-                }
-
-                // evaluate using Evaluate method after assuimg the move
-                board.MakeMove(move);
-                int strengthOfPosition = Evaluate(board);
-                if (strengthOfPosition > highestStrengthPosition)
-                {
-                    highestStrengthPosition = strengthOfPosition;
-                    moveToPlay = move;
-                }
-                board.UndoMove(move);
-            }
-
-            // debug log the chosen move out of all the possible moves
-            Console.WriteLine("Chosen move: " + moveToPlay.ToString());
-            // write the strength of the move
-            Console.WriteLine("Strength of move: " + highestStrengthPosition.ToString());
-
-            return moveToPlay;
+    private (int, Move) Minimax(Board board, int depth, int alpha, int beta, bool maximizingPlayer)
+    {
+        string boardHash = board.GetFenString();
+        if (transpositionTable.ContainsKey(boardHash))
+        {
+            return transpositionTable[boardHash];
         }
 
-        // Test if this move gives checkmate
-        bool MoveIsCheckmate(Board board, Move move)
+        if (depth == 0)
+        {
+            return (QuiescenceSearch(board, alpha, beta, maximizingPlayer), new Move());
+        }
+
+        Move bestMove = new Move();
+        if (maximizingPlayer)
+        {
+            int maxEval = int.MinValue;
+            foreach (var move in board.GetLegalMoves())
+            {
+                board.MakeMove(move);
+                var (eval, _) = Minimax(board, depth - 1, alpha, beta, false);
+                board.UndoMove(move);
+                if (eval > maxEval)
+                {
+                    maxEval = eval;
+                    bestMove = move;
+                }
+                alpha = Math.Max(alpha, eval);
+                if (beta <= alpha)
+                    break;
+            }
+            transpositionTable[boardHash] = (maxEval, bestMove);
+            return (maxEval, bestMove);
+        }
+        else
+        {
+            int minEval = int.MaxValue;
+            foreach (var move in board.GetLegalMoves())
+            {
+                board.MakeMove(move);
+                var (eval, _) = Minimax(board, depth - 1, alpha, beta, true);
+                board.UndoMove(move);
+                if (eval < minEval)
+                {
+                    minEval = eval;
+                    bestMove = move;
+                }
+                beta = Math.Min(beta, eval);
+                if (beta <= alpha)
+                    break;
+            }
+            transpositionTable[boardHash] = (minEval, bestMove);
+            return (minEval, bestMove);
+        }
+    }
+
+    private int QuiescenceSearch(Board board, int alpha, int beta, bool maximizingPlayer)
+    {
+        int standPat = EvaluateBoard(board);
+        if (standPat >= beta && maximizingPlayer || standPat <= alpha && !maximizingPlayer)
+            return standPat;
+
+        var dangerousMoves = board.GetLegalMoves().Where(move =>
         {
             board.MakeMove(move);
-            bool isMate = board.IsInCheckmate();
+            bool inCheck = board.IsInCheck();
             board.UndoMove(move);
-            return isMate;
+            return move.IsCapture ||  // Capture
+                   inCheck ||  // Check
+                   (board.GetPiece(move.StartSquare).PieceType == PieceType.Pawn &&
+                    (move.TargetSquare.Rank == 0 || move.TargetSquare.Rank == 7));  // Pawn promotion
+        });
+
+        foreach (var move in dangerousMoves)
+        {
+            board.MakeMove(move);
+            int score = -QuiescenceSearch(board, -beta, -alpha, !maximizingPlayer);
+            board.UndoMove(move);
+
+            if (score >= beta && maximizingPlayer || score <= alpha && !maximizingPlayer)
+                return score;
+            if (score > alpha && maximizingPlayer || score < beta && !maximizingPlayer)
+                alpha = beta = score;
         }
 
-        // Evaluate the current position
-    int Evaluate(Board board)
+        return maximizingPlayer ? alpha : beta;
+    }
+
+    private int EvaluateBoard(Board board)
     {
         int score = 0;
 
-        // use GetAllPieceLists from Board and then determine Material balance
-        
-        PieceList[] pieceLists = board.GetAllPieceLists(); // there's a list for each type and color, so 12 at the start
-        // Material balance
-        foreach (PieceList pieceList in pieceLists)
+        for (int rank = 0; rank < 8; rank++)
         {
-            if (pieceList.IsWhitePieceList == board.IsWhiteToMove)
+            for (int file = 0; file < 8; file++)
             {
-                foreach (Piece piece in pieceList)
-                {
-                    score += pieceValues[(int)piece.PieceType];
+                var square = new Square(file, rank);
+                var piece = board.GetPiece(square);
 
-                    switch (piece.PieceType) // Positional heuristics
-                    {
-                    case PieceType.Knight:
-                        score += EvaluateKnight(board, piece);
-                        break;
-                    case PieceType.Bishop:
-                        score += EvaluateBishop(board, piece);
-                        break;
-                    case PieceType.Rook:
-                        score += EvaluateRook(board, piece);
-                        break;
-                    case PieceType.Queen:
-                        score += EvaluateQueen(board, piece);
-                        break;
-                    case PieceType.King:
-                        score += EvaluateKing(board, piece);
-                        break;
-                    }
-                }
-            }
-            else
-            {
-                foreach (Piece piece in pieceList)
-                {
-                    score -= pieceValues[(int)piece.PieceType];
+                int colorModifier = piece.IsWhite ? 1 : -1;
+                score += colorModifier * GetPieceValue(piece);
+                score += colorModifier * GetPieceSquareTableValue(piece, square);
 
-                    switch (piece.PieceType) // Positional heuristics
-                    {
-                    case PieceType.Knight:
-                        score -= EvaluateKnight(board, piece);
-                        break;
-                    case PieceType.Bishop:
-                        score -= EvaluateBishop(board, piece);
-                        break;
-                    case PieceType.Rook:
-                        score -= EvaluateRook(board, piece);
-                        break;
-                    case PieceType.Queen:
-                        score -= EvaluateQueen(board, piece);
-                        break;
-                    case PieceType.King:
-                        score -= EvaluateKing(board, piece);
-                        break;
-                    }
-                }
+                if (piece.PieceType == PieceType.Pawn && IsPassedPawn(board, square, piece.IsWhite))
+                    score += colorModifier * 20;  // Passed pawns are a major advantage
+                if (piece.PieceType == PieceType.King && IsKingExposed(board, square, piece.IsWhite))
+                    score -= colorModifier * 50;  // Exposed kings are a major disadvantage
+                
             }
         }
 
-        
+        // score += board.IsWhiteToMove ? board.GetLegalMoves().Count : -board.GetLegalMoves().Count;
         return score;
     }
 
-    // Evaluate the position of a knight
-    int EvaluateKnight(Board board, Piece knight)
+    private int GetPieceValue(Piece piece)
     {
-        int score = 0;
-
-        // Centralization bonus
-        // knight.Square.File and knight.Square.Rank are both in the range [0, 7]
-        // so the maximum distance from the center is 7 + 7 = 14
-        int distanceFromCenter = Math.Abs(knight.Square.File - 3) + Math.Abs(knight.Square.Rank - 3);
-        int centralization = 14 - distanceFromCenter;
-        score += centralization;
-
-        return score;
-    }
-
-    // Evaluate the position of a bishop
-    int EvaluateBishop(Board board, Piece bishop)
-    {
-        int score = 0;
-
-        // Centralization bonus
-        int distanceFromCenter = Math.Abs(bishop.Square.File - 3) + Math.Abs(bishop.Square.Rank - 3);
-        int centralization = 14 - distanceFromCenter;
-        score += centralization;
-
-        // TODO: Bishop pair bonus
-
-        return score;
-    }
-
-    // Evaluate the position of a rook
-    int EvaluateRook(Board board, Piece rook)
-    {
-        int score = 0;
-
-        // Centralization bonus
-        int distanceFromCenter = Math.Abs(rook.Square.File - 3) + Math.Abs(rook.Square.Rank - 3);
-        int centralization = 14 - distanceFromCenter;
-        score += centralization;
-        return score;
-    }
-
-    // Evaluate the position of a queen
-    int EvaluateQueen(Board board, Piece queen)
-    {
-        int score = 0;
-
-        // Centralization bonus
-        int distanceFromCenter = Math.Abs(queen.Square.File - 3) + Math.Abs(queen.Square.Rank - 3);
-        int centralization = 14 - distanceFromCenter;
-        score += centralization;
-
-        return score;
-    }
-
-    // Evaluate the position of a king
-    int EvaluateKing(Board board, Piece king)
-    {
-        int score = 0;
-
-        // Safety bonus
-        if (board.IsInCheck())
+        return piece.PieceType switch
         {
-            score -= 50;
+            PieceType.Pawn => 1,
+            PieceType.Knight => 3,
+            PieceType.Bishop => 3,
+            PieceType.Rook => 5,
+            PieceType.Queen => 9,
+            _ => 0,
+        };
+    }
+
+    private int GetPieceSquareTableValue(Piece piece, Square square)
+    {
+        int[,] pieceSquareTable;
+
+        switch (piece.PieceType)
+        {
+            case PieceType.Pawn:
+                pieceSquareTable = new int[,]
+                {
+                    {0, 0, 0, 0, 0, 0, 0, 0},
+                    {5, 10, 10, -20, -20, 10, 10, 5},
+                    {5, -5, -10, 0, 0, -10, -5, 5},
+                    {0, 0, 0, 20, 20, 0, 0, 0},
+                    {5, 5, 10, 25, 25, 10, 5, 5},
+                    {10, 10, 20, 30, 30, 20, 10, 10},
+                    {50, 50, 50, 50, 50, 50, 50, 50},
+                    {0, 0, 0, 0, 0, 0, 0, 0}
+                };
+                break;
+            // Add similar tables for other piece types
+            default:
+                pieceSquareTable = new int[8, 8];
+                break;
         }
 
-        return score;
+        return pieceSquareTable[square.File, square.Rank];
+    }
+
+    private bool IsPassedPawn(Board board, Square square, bool isWhite)
+    {
+        int direction = isWhite ? 1 : -1;
+
+        // Check for enemy pawns in front
+        for (int i = -1; i <= 1; i++)
+        {
+            for (int j = 1; j < 8; j++)
+            {
+                int newFile = square.File + i;
+                int newRank = square.Rank + j * direction;
+                if (newFile >= 0 && newFile < 8 && newRank >= 0 && newRank < 8)
+                {
+                    var piece = board.GetPiece(new Square(newFile, newRank));
+                    if (piece.PieceType == PieceType.Pawn && piece.IsWhite != isWhite)
+                    {
+                        return false;
+                    }
+                }
+            }
+        }
+
+        // Check for doubled pawns
+        for (int j = 1; j < 8; j++)
+        {
+            int newRank = square.Rank + j * direction;
+            if (newRank >= 0 && newRank < 8)
+            {
+                var piece = board.GetPiece(new Square(square.File, newRank));
+                if (piece.PieceType == PieceType.Pawn && piece.IsWhite == isWhite)
+                {
+                    return false;
+                }
+            }
+        }
+
+        // Check for pawn chains
+        for (int i = -1; i <= 1; i += 2)
+        {
+            int newFile = square.File + i;
+            if (newFile >= 0 && newFile < 8)
+            {
+                var piece = board.GetPiece(new Square(newFile, square.Rank));
+                if (piece.PieceType == PieceType.Pawn && piece.IsWhite == isWhite)
+                {
+                    return true;
+                }
+            }
+        }
+
+        return true;
+    }
+
+    private bool IsKingExposed(Board board, Square kingSquare, bool isWhite)
+    {
+        // Check for pawn shelter
+        for (int i = -1; i <= 1; i++)
+        {
+            for (int j = 1; j <= 2; j++)
+            {
+                int newFile = kingSquare.File + i;
+                int newRank = isWhite ? kingSquare.Rank - j : kingSquare.Rank + j;
+                if (newFile >= 0 && newFile < 8 && newRank >= 0 && newRank < 8)
+                {
+                    var piece = board.GetPiece(new Square(newFile, newRank));
+                    if (piece.PieceType != PieceType.Pawn || piece.IsWhite != isWhite)
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        // Check for open lines
+        foreach (var direction in new[] { new { File = 0, Rank = 1 }, new { File = 1, Rank = 1 }, new { File = 1, Rank = 0 }, new { File = 1, Rank = -1 }, new { File = 0, Rank = -1 }, new { File = -1, Rank = -1 }, new { File = -1, Rank = 0 }, new { File = -1, Rank = 1 } })
+        {
+            for (int i = 1; i < 8; i++)
+            {
+                int newFile = kingSquare.File + i * direction.File;
+                int newRank = kingSquare.Rank + i * direction.Rank;
+                if (newFile >= 0 && newFile < 8 && newRank >= 0 && newRank < 8)
+                {
+                    var piece = board.GetPiece(new Square(newFile, newRank));
+                    if (piece.IsWhite != isWhite && (piece.PieceType == PieceType.Queen || piece.PieceType == PieceType.Rook && direction.File * direction.Rank == 0 || piece.PieceType == PieceType.Bishop && direction.File * direction.Rank != 0))
+                    {
+                        return true;
+                    }
+                }
+                else
+                {
+                    break;
+                }
+            }
+        }
+
+        return false;
     }
 }
